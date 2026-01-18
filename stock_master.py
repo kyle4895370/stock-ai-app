@@ -4,7 +4,7 @@ import plotly.graph_objects as go
 import pandas as pd
 import numpy as np
 import feedparser
-import io  # <--- 新增：用於處理檔案下載
+import io
 from datetime import date, timedelta, datetime
 from prophet import Prophet
 from sklearn.ensemble import RandomForestRegressor
@@ -17,14 +17,18 @@ st.set_page_config(page_title="AI 股市全能戰情室", layout="wide", page_ic
 # --- 2. 側邊欄：主控台 ---
 st.sidebar.title("🎛️ 戰情室控制台")
 app_mode = st.sidebar.radio("選擇功能模組", ["🔮 未來 K 線推演 (90天)", "🔬 趨勢預測實驗室", "🎛️ 操盤手情境模擬"])
+
 st.sidebar.markdown("---")
 st.sidebar.header("股票參數設定")
 ticker = st.sidebar.text_input("輸入股票代碼", value="2330.TW")
+
+# 使用月份作為滑桿單位，預設 6 個月，讓 AI 對近期波動更敏感
 history_months = st.sidebar.slider("歷史資料長度 (月)", 3, 60, 6) 
 history_years = history_months / 12 
 
 # --- 新聞抓取函數 ---
 def get_stock_news(stock_name):
+    # 針對台灣 Google News 進行搜尋
     rss_url = f"https://news.google.com/rss/search?q={stock_name}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
     feed = feedparser.parse(rss_url)
     return feed.entries[:5]
@@ -37,15 +41,22 @@ def load_data(ticker, years):
     try:
         df = yf.download(ticker, start=start_date, end=end_date)
         df.reset_index(inplace=True)
-        if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+        # 處理 yfinance 可能的 MultiIndex 格式
+        if isinstance(df.columns, pd.MultiIndex): 
+            df.columns = df.columns.get_level_values(0)
+        
         needed_cols = ['Date', 'Open', 'High', 'Low', 'Close', 'Volume']
-        if not all(col in df.columns for col in needed_cols): return None
+        if not all(col in df.columns for col in needed_cols): 
+            return None
         return df
-    except: return None
+    except: 
+        return None
 
+# 載入資料
 data = load_data(ticker, history_years)
+
 if data is None or data.empty:
-    st.error(f"❌ 找不到股票代碼 {ticker} 的資料。")
+    st.error(f"❌ 找不到股票代碼 {ticker} 的資料，請確認輸入是否正確（台股請加 .TW）。")
     st.stop()
 
 # ==========================================
@@ -56,15 +67,18 @@ if app_mode == "🔮 未來 K 線推演 (90天)":
     st.info("💡 說明：AI 預測「收盤價趨勢」，並結合歷史波動率生成「模擬 K 棒」。")
     
     with st.spinner("AI 運算中..."):
+        # 1. Prophet 預測趨勢
         df_prophet = data[['Date', 'Close']].rename(columns={'Date': 'ds', 'Close': 'y'})
         m = Prophet(daily_seasonality=True)
         m.fit(df_prophet)
         future = m.make_future_dataframe(periods=90)
         forecast = m.predict(future)
         
+        # 2. 計算平均波動率
         data['H_L'] = data['High'] - data['Low']
         avg_volatility = data['H_L'].mean()
         
+        # 3. 合成未來數據
         future_data = forecast[['ds', 'yhat']].tail(90).copy()
         future_data.columns = ['Date', 'Pred_Close']
         
@@ -75,24 +89,46 @@ if app_mode == "🔮 未來 K 線推演 (90天)":
         
         for i in range(90):
             current_close = future_closes[i]
+            # 開盤價模擬
             open_price = last_close if i == 0 else future_closes[i-1] * (1 + np.random.normal(0, 0.005))
+            # 高低點模擬
             high_price = max(open_price, current_close) + abs(np.random.normal(avg_volatility * 0.5, avg_volatility * 0.2))
             low_price = min(open_price, current_close) - abs(np.random.normal(avg_volatility * 0.5, avg_volatility * 0.2))
-            future_opens.append(open_price); future_highs.append(high_price); future_lows.append(low_price)
+            
+            future_opens.append(open_price)
+            future_highs.append(high_price)
+            future_lows.append(low_price)
 
-        future_data['Open'] = future_opens; future_data['High'] = future_highs; future_data['Low'] = future_lows; future_data['Close'] = future_closes
+        future_data['Open'] = future_opens
+        future_data['High'] = future_highs
+        future_data['Low'] = future_lows
+        future_data['Close'] = future_closes
 
+        # 4. 繪圖
         fig = go.Figure()
-        fig.add_trace(go.Candlestick(x=recent['Date'], open=recent['Open'], high=recent['High'], low=recent['Low'], close=recent['Close'], name='歷史'))
-        fig.add_trace(go.Candlestick(x=future_data['Date'], open=future_data['Open'], high=future_data['High'], low=future_data['Low'], close=future_data['Close'], name='預測', increasing_line_color='cyan', decreasing_line_color='gray'))
-        fig.update_layout(xaxis_rangeslider_visible=False)
+        
+        # 【重要修正】這裡改用 data (全部資料)，不再只顯示 tail(60)
+        # 這樣圖表就會完整顯示你側邊欄設定的歷史長度
+        fig.add_trace(go.Candlestick(x=data['Date'],
+                        open=data['Open'], high=data['High'],
+                        low=data['Low'], close=data['Close'],
+                        name='歷史股價'))
+
+        # 繪製未來預測線
+        fig.add_trace(go.Candlestick(x=future_data['Date'],
+                        open=future_data['Open'], high=future_data['High'],
+                        low=future_data['Low'], close=future_data['Close'],
+                        name='AI 預測 K 線',
+                        increasing_line_color='cyan', decreasing_line_color='gray'))
+        
+        fig.update_layout(title=f"{ticker} 未來 90 天模擬走勢圖", xaxis_rangeslider_visible=False, height=600)
         st.plotly_chart(fig, use_container_width=True)
 
 # ==========================================
 # 功能模組 2: 趨勢預測實驗室
 # ==========================================
 elif app_mode == "🔬 趨勢預測實驗室":
-    st.title("🔬 AI 預測實驗室")
+    st.title("🔬 AI 預測實驗室：多模型交叉比對")
     predict_days = st.slider("預測天數", 30, 180, 90)
     
     with st.spinner("AI 模型競賽中..."):
@@ -101,7 +137,7 @@ elif app_mode == "🔬 趨勢預測實驗室":
         m = Prophet(daily_seasonality=True); m.fit(df_p)
         p1 = m.predict(m.make_future_dataframe(periods=predict_days))['yhat'].values[-predict_days:]
         
-        # Linear Reg
+        # Linear Regression
         data['Ordinal'] = pd.to_datetime(data['Date']).map(pd.Timestamp.toordinal)
         lr = LinearRegression().fit(data[['Ordinal']], data['Close'])
         last_ord = data['Ordinal'].iloc[-1]
@@ -111,11 +147,12 @@ elif app_mode == "🔬 趨勢預測實驗室":
         p3 = ExponentialSmoothing(data['Close'], trend='add', seasonal=None).fit().forecast(predict_days).values
         
         future_dates = [data['Date'].iloc[-1] + timedelta(days=x) for x in range(1, predict_days + 1)]
+        
         fig = go.Figure()
-        fig.add_trace(go.Scatter(x=data['Date'].tail(180), y=data['Close'].tail(180), name="歷史", line=dict(color='black')))
-        fig.add_trace(go.Scatter(x=future_dates, y=p1, name="Prophet", line=dict(color='blue')))
-        fig.add_trace(go.Scatter(x=future_dates, y=p2, name="Linear Reg", line=dict(color='green', dash='dot')))
-        fig.add_trace(go.Scatter(x=future_dates, y=p3, name="Holt-Winters", line=dict(color='orange', dash='dash')))
+        fig.add_trace(go.Scatter(x=data['Date'], y=data['Close'], name="歷史股價", line=dict(color='black')))
+        fig.add_trace(go.Scatter(x=future_dates, y=p1, name="Prophet (趨勢+週期)", line=dict(color='blue')))
+        fig.add_trace(go.Scatter(x=future_dates, y=p2, name="Linear Reg (純趨勢)", line=dict(color='green', dash='dot')))
+        fig.add_trace(go.Scatter(x=future_dates, y=p3, name="Holt-Winters (加權平滑)", line=dict(color='orange', dash='dash')))
         st.plotly_chart(fig, use_container_width=True)
 
 # ==========================================
@@ -139,6 +176,7 @@ elif app_mode == "🎛️ 操盤手情境模擬":
         df_sim['Target'] = df_sim['Close']; df_sim['Prev_Close'] = df_sim['Close'].shift(1)
         df_sim['Prev_Vol'] = df_sim['Volume'].shift(1); df_sim['Prev_Market'] = df_sim['Market_Close'].shift(1)
         df_sim.dropna(inplace=True)
+        
         rf = RandomForestRegressor(n_estimators=100, random_state=42)
         rf.fit(df_sim[['Prev_Close', 'Prev_Vol', 'Prev_Market']], df_sim['Target'])
         
@@ -185,11 +223,10 @@ elif app_mode == "🎛️ 操盤手情境模擬":
     st.divider()
     st.metric("🔮 最終預測", f"{final_price:.2f}", f"{final_chg:.2f}%")
     
-    # --- 新增：生成與下載報告功能 ---
+    # --- 生成與下載報告功能 ---
     st.write("---")
     st.subheader("💾 存檔與記錄")
     
-    # 準備報告內容 (文字格式)
     report_text = f"""
     【AI 股市戰情室 - 每日分析報告】
     --------------------------------
@@ -214,7 +251,6 @@ elif app_mode == "🎛️ 操盤手情境模擬":
     (本報告由 AI 自動生成，僅供參考)
     """
     
-    # 下載按鈕
     st.download_button(
         label="📥 下載今日分析報告 (TXT)",
         data=report_text,
